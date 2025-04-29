@@ -8,6 +8,7 @@ from PIL import Image
 from torchvision import transforms
 import torch.nn as nn
 from pdf2image import convert_from_path, pdfinfo_from_path # Import pdf2image
+import tempfile # Import tempfile for creating temporary files
 
 # Define the CRNN model class (remains the same)
 class CRNN(nn.Module):
@@ -280,131 +281,172 @@ def main():
     st.title("Answer Sheet Extractor")
 
     # Load models
-    with st.spinner("Loading models..."):
-        try:
-            # Instantiate AnswerSheetExtractor with both YOLO model paths
-            # Ensure these files ('improved_weights.pt' and 'weights.pt')
-            # are present in your GitHub repository root.
-            extractor = AnswerSheetExtractor(
-                primary_yolo_weights_path="improved_weights.pt",
-                fallback_yolo_weights_path="weights.pt", # Your previous weights
-                register_crnn_model_path="best_crnn_model(git).pth",
-                subject_crnn_model_path="best_subject_model_final.pth"
-            )
-            st.success("Models loaded successfully")
-        except Exception as e:
-            st.error(f"Failed to load models. Please check your model paths and ensure they are in your repository. Error: {e}")
-            st.exception(e) # Display full traceback in logs
-            return
-
-    # Upload file (now accepts PDF or image)
-    uploaded_file = st.file_uploader("Upload Answer Sheet PDF or Image", type=["pdf", "png", "jpg", "jpeg"])
-
-    if uploaded_file is not None:
-        # Create a temporary directory for uploads and processed images
-        temp_dir = "temp_uploads"
-        os.makedirs(temp_dir, exist_ok=True)
-
-        # Determine file type and process accordingly
-        file_extension = uploaded_file.name.split('.')[-1].lower()
-        temp_file_path = os.path.join(temp_dir, uploaded_file.name)
-        image_to_process_path = None # This will store the path to the image file
-
-        # Save the uploaded file
-        with open(temp_file_path, "wb") as f:
-            f.write(uploaded_file.getbuffer())
-
-        if file_extension == 'pdf':
-            st.info(f"Processing uploaded PDF: {uploaded_file.name}")
+    # Use Streamlit's caching to avoid reloading models on every interaction
+    @st.cache_resource
+    def load_extractor():
+        with st.spinner("Loading models..."):
             try:
-                # Convert the first page of the PDF to an image
-                images_from_pdf = convert_from_path(temp_file_path, dpi=300, first_page=1, last_page=1)
-                if images_from_pdf:
-                    first_page_image = images_from_pdf[0]
-                    # Save the converted image to a temporary file
-                    image_filename = os.path.splitext(uploaded_file.name)[0] + "_page_1.jpg"
-                    image_to_process_path = os.path.join(temp_dir, image_filename)
-                    first_page_image.save(image_to_process_path, "JPEG")
-                    st.success("Successfully converted first page of PDF to image.")
-                else:
-                    st.error("Could not convert first page of PDF to image.")
+                # Instantiate AnswerSheetExtractor with both YOLO model paths
+                # Ensure these files ('improved_weights.pt' and 'weights.pt')
+                # are present in your GitHub repository root.
+                extractor = AnswerSheetExtractor(
+                    primary_yolo_weights_path="improved_weights.pt",
+                    fallback_yolo_weights_path="weights.pt", # Your previous weights
+                    register_crnn_model_path="best_crnn_model(git).pth",
+                    subject_crnn_model_path="best_subject_model_final.pth"
+                )
+                st.success("Models loaded successfully")
+                return extractor
+            except Exception as e:
+                st.error(f"Failed to load models. Please check your model paths and ensure they are in your repository. Error: {e}")
+                st.exception(e) # Display full traceback in logs
+                return None
+
+    extractor = load_extractor()
+
+    if extractor is None:
+        st.stop() # Stop the app if models failed to load
+
+    # Input source selection
+    input_source = st.radio("Select Input Source", ("Upload File", "Webcam"))
+
+    image_to_process_path = None # This will store the path to the image file
+
+    # Create a temporary directory for uploads and processed images
+    temp_dir = "temp_uploads"
+    os.makedirs(temp_dir, exist_ok=True)
+
+    if input_source == "Upload File":
+        uploaded_file = st.file_uploader("Upload Answer Sheet PDF or Image", type=["pdf", "png", "jpg", "jpeg"])
+
+        if uploaded_file is not None:
+            temp_file_path = os.path.join(temp_dir, uploaded_file.name)
+
+            # Save the uploaded file
+            with open(temp_file_path, "wb") as f:
+                f.write(uploaded_file.getbuffer())
+
+            file_extension = uploaded_file.name.split('.')[-1].lower()
+
+            if file_extension == 'pdf':
+                st.info(f"Processing uploaded PDF: {uploaded_file.name}")
+                try:
+                    # Convert the first page of the PDF to an image
+                    images_from_pdf = convert_from_path(temp_file_path, dpi=300, first_page=1, last_page=1)
+                    if images_from_pdf:
+                        first_page_image = images_from_pdf[0]
+                        # Save the converted image to a temporary file
+                        image_filename = os.path.splitext(uploaded_file.name)[0] + "_page_1.jpg"
+                        image_to_process_path = os.path.join(temp_dir, image_filename)
+                        first_page_image.save(image_to_process_path, "JPEG")
+                        st.success("Successfully converted first page of PDF to image.")
+                    else:
+                        st.error("Could not convert first page of PDF to image.")
+                        # Clean up the temporary PDF file
+                        os.remove(temp_file_path)
+
+
+                except Exception as e:
+                    st.error(f"Error converting PDF to image: {e}")
+                    st.exception(e)
                     # Clean up the temporary PDF file
                     os.remove(temp_file_path)
-                    return # Stop processing if conversion failed
 
-            except Exception as e:
-                st.error(f"Error converting PDF to image: {e}")
-                st.exception(e)
-                # Clean up the temporary PDF file
+
+                finally:
+                    # Clean up the temporary PDF file after processing attempt
+                    if os.path.exists(temp_file_path):
+                        os.remove(temp_file_path)
+
+
+            elif file_extension in ['png', 'jpg', 'jpeg']:
+                st.info(f"Processing uploaded image: {uploaded_file.name}")
+                # If it's already an image, the temporary file is the one to process
+                image_to_process_path = temp_file_path
+
+            else:
+                st.error(f"Unsupported file type: {file_extension}")
+                # Clean up the temporary file
                 os.remove(temp_file_path)
-                return # Stop processing on error
-
-            # Clean up the temporary PDF file after successful conversion
-            os.remove(temp_file_path)
-
-        elif file_extension in ['png', 'jpg', 'jpeg']:
-            st.info(f"Processing uploaded image: {uploaded_file.name}")
-            # If it's already an image, the temporary file is the one to process
-            image_to_process_path = temp_file_path
-
-        else:
-            st.error(f"Unsupported file type: {file_extension}")
-            # Clean up the temporary file
-            os.remove(temp_file_path)
-            return # Stop processing for unsupported types
 
 
-        # Display the image that will be processed
-        if image_to_process_path and os.path.exists(image_to_process_path):
-             st.image(image_to_process_path, caption="Image to Process", use_column_width=True)
+    elif input_source == "Webcam":
+        st.info("Using webcam. Please ensure your answer sheet is clearly visible.")
+        camera_image = st.camera_input("Take a picture of the answer sheet")
 
-             # Process image
-             if st.button("Extract Information"):
-                 with st.spinner("Processing image..."):
-                     try:
-                         results, register_cropped, subject_cropped = extractor.process_answer_sheet(image_to_process_path)
-                         st.success("Extraction complete")
+        if camera_image is not None:
+            # Save the captured image to a temporary file
+            # Use tempfile to create a unique temporary file
+            with tempfile.NamedTemporaryFile(dir=temp_dir, suffix=".jpg", delete=False) as tmp_file:
+                tmp_file.write(camera_image.getvalue())
+                image_to_process_path = tmp_file.name
+            st.success("Image captured from webcam.")
 
-                         # Display results
-                         if results:
-                             st.subheader("Extracted Information:")
-                             for label, value in results:
-                                 st.write(f"**{label}:** {value}")
-                         else:
-                             st.warning("No information could be extracted.")
 
-                         # Display cropped images
-                         st.subheader("Detected Regions:")
-                         if register_cropped and os.path.exists(register_cropped):
-                              register_img = Image.open(register_cropped)
-                              st.image(register_img, caption="Cropped Register Number", width=250)
-                         else:
-                              st.info("No Register Number region found to display.")
+    # Process the image if one is available from either source
+    if image_to_process_path and os.path.exists(image_to_process_path):
+         # Display the image that will be processed
+         st.image(image_to_process_path, caption="Image to Process", use_column_width=True)
 
-                         if subject_cropped and os.path.exists(subject_cropped):
-                              subject_img = Image.open(subject_cropped)
-                              st.image(subject_img, caption="Cropped Subject Code", width=250)
-                         else:
-                              st.info("No Subject Code region found to display.")
+         # Process image
+         if st.button("Extract Information"):
+             with st.spinner("Processing image..."):
+                 try:
+                     results, register_cropped, subject_cropped = extractor.process_answer_sheet(image_to_process_path)
+                     st.success("Extraction complete")
 
-                     except Exception as e:
-                         st.error(f"Failed to process image: {e}")
-                         st.exception(e) # Display full traceback in Streamlit logs
-                     finally:
-                         # Clean up temporary cropped images after processing
-                         for folder in ["cropped_register_numbers", "cropped_subject_codes", "results"]:
-                             if os.path.exists(folder):
-                                 for file in os.listdir(folder):
-                                     os.remove(os.path.join(folder, file))
-                                 # Optionally remove the folder if empty
-                                 # os.rmdir(folder)
+                     # Display results
+                     if results:
+                         st.subheader("Extracted Information:")
+                         for label, value in results:
+                             st.write(f"**{label}:** {value}")
+                     else:
+                         st.warning("No information could be extracted.")
 
-                         # Clean up the temporary image file that was processed
-                         if os.path.exists(image_to_process_path):
+                     # Display cropped images
+                     st.subheader("Detected Regions:")
+                     if register_cropped and os.path.exists(register_cropped):
+                          register_img = Image.open(register_cropped)
+                          st.image(register_img, caption="Cropped Register Number", width=250)
+                     else:
+                          st.info("No Register Number region found to display.")
+
+                     if subject_cropped and os.path.exists(subject_cropped):
+                          subject_img = Image.open(subject_cropped)
+                          st.image(subject_img, caption="Cropped Subject Code", width=250)
+                     else:
+                          st.info("No Subject Code region found to display.")
+
+                 except Exception as e:
+                     st.error(f"Failed to process image: {e}")
+                     st.exception(e) # Display full traceback in Streamlit logs
+                 finally:
+                     # Clean up temporary cropped images after processing
+                     for folder in ["cropped_register_numbers", "cropped_subject_codes", "results"]:
+                         if os.path.exists(folder):
+                             # Iterate over a copy of the list to avoid issues when deleting
+                             for file in list(os.listdir(folder)):
+                                 file_path = os.path.join(folder, file)
+                                 try:
+                                     os.remove(file_path)
+                                 except OSError as e:
+                                     st.warning(f"Could not remove temporary file {file_path}: {e}")
+
+                     # Clean up the temporary image file that was processed
+                     if os.path.exists(image_to_process_path):
+                         try:
                              os.remove(image_to_process_path)
+                         except OSError as e:
+                             st.warning(f"Could not remove temporary processed image {image_to_process_path}: {e}")
 
-        else:
-            st.error("No image file available for processing.")
+
+    # Add a placeholder to keep the "Extract Information" button visible
+    # even if no file is uploaded or image captured yet
+    # (This is a common Streamlit pattern for conditional buttons)
+    if input_source == "Upload File" and uploaded_file is None:
+        st.empty() # Or a message like "Upload a file to proceed"
+    elif input_source == "Webcam" and camera_image is None:
+         st.empty() # Or a message like "Take a picture to proceed"
 
 
 if __name__ == "__main__":
