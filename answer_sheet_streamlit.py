@@ -75,7 +75,7 @@ class AnswerSheetExtractor:
         self.register_crnn_model.to(self.device)
         checkpoint = torch.load(register_crnn_model_path, map_location=self.device)
         # Handle potential 'module.' prefix if model was trained with DataParallel
-        state_dict = checkpoint['model_state_dict']
+        state_dict = checkpoint.get('model_state_dict', checkpoint) # Handle if state_dict was saved directly
         new_state_dict = {}
         for k, v in state_dict.items():
             if k.startswith('module.'):
@@ -90,7 +90,7 @@ class AnswerSheetExtractor:
         self.subject_crnn_model.to(self.device)
         # Handle potential 'module.' prefix similarly for subject model
         subject_checkpoint = torch.load(subject_crnn_model_path, map_location=self.device)
-        subject_state_dict = subject_checkpoint['model_state_dict'] if isinstance(subject_checkpoint, dict) and 'model_state_dict' in subject_checkpoint else subject_checkpoint # Handle if only state_dict was saved
+        subject_state_dict = subject_checkpoint.get('model_state_dict', subject_checkpoint) # Handle if state_dict was saved directly
         new_subject_state_dict = {}
         for k, v in subject_state_dict.items():
              if k.startswith('module.'):
@@ -115,7 +115,7 @@ class AnswerSheetExtractor:
         # Define character map for subject code
         self.char_map = {i: str(i-1) for i in range(1, 11)} # 1-10 -> 0-9
         self.char_map.update({i: chr(i - 11 + ord('A')) for i in range(11, 37)}) # 11-36 -> A-Z
-        self.char_map[0] = '' # Map blank to empty string
+        self.char_map[0] = '' # Map blank (index 0) to empty string
 
 
     def detect_regions(self, image_path):
@@ -130,7 +130,7 @@ class AnswerSheetExtractor:
         classes_primary = results_primary[0].names
 
         register_regions = []
-        subject_regions = []
+        subject_regions_primary = [] # Keep primary subject detections separate initially
 
         # Process primary detections
         for i, box in enumerate(detections_primary):
@@ -151,11 +151,11 @@ class AnswerSheetExtractor:
                  # Use a distinct name for primary detections
                  save_path = f"cropped_subject_codes/subject_code_primary_{i}.jpg"
                  cv2.imwrite(save_path, cropped_region)
-                 subject_regions.append((save_path, confidence))
+                 subject_regions_primary.append((save_path, confidence))
 
 
         # --- Step 2: Check if Primary found SubjectCode and run fallback if necessary ---
-        final_subject_regions = subject_regions # Start with primary results for subject
+        final_subject_regions = subject_regions_primary # Start with primary results for subject
 
         if not final_subject_regions: # If primary model found NO subject codes
             st.warning("Primary model did not detect Subject Code. Running fallback YOLO model...")
@@ -178,36 +178,33 @@ class AnswerSheetExtractor:
                     cv2.imwrite(save_path, cropped_region)
                     subject_regions_fallback.append((save_path, confidence))
 
-            # Replace subject regions with fallback results if fallback found any
+            # Replace final subject regions with fallback results
             final_subject_regions = subject_regions_fallback
             if not final_subject_regions:
                  st.warning("Fallback model also did not detect Subject Code.")
             else:
                  st.success(f"Fallback model detected {len(final_subject_regions)} Subject Code region(s).")
+        else:
+             st.success(f"Primary model detected {len(final_subject_regions)} Subject Code region(s).")
 
 
         # Return the register regions from the primary model
         # and the subject regions (either from primary or fallback)
         return register_regions, final_subject_regions
 
-    # Keep extract_register_number and extract_subject_code methods as they are
-    # (They will process the cropped images saved by detect_regions)
+    # Keep extract_register_number method as is
     def extract_register_number(self, image_path):
         try:
             image = Image.open(image_path).convert('L')
             image_tensor = self.register_transform(image).unsqueeze(0).to(self.device)
             with torch.no_grad():
                 output = self.register_crnn_model(image_tensor).squeeze(1)
-                # Applying softmax for clarity, although argmax on logits is equivalent
-                output_probs = output.softmax(1)
-                output = output_probs.argmax(1)
+                output = output.softmax(1).argmax(1)
                 seq = output.cpu().numpy()
                 prev = -1 # CTC decoding requires tracking previous character
                 result = []
                 for s in seq:
-                    # s != 0 checks for blank token (index 0)
-                    # s != prev checks for consecutive identical non-blank tokens
-                    if s != 0 and s != prev:
+                    if s != 0 and s != prev: # s != 0 is blank token (index 0 for digits usually)
                         result.append(s - 1) # Map 1-10 to 0-9
                     prev = s
             return ''.join(map(str, result))
@@ -215,41 +212,37 @@ class AnswerSheetExtractor:
             st.error(f"Error extracting register number from {image_path}: {e}")
             return "EXTRACTION ERROR"
 
+    # Keep extract_subject_code method as is
     def extract_subject_code(self, image_path):
         try:
             image = Image.open(image_path).convert('L')
             image_tensor = self.subject_transform(image).unsqueeze(0).to(self.device)
             with torch.no_grad():
                 output = self.subject_crnn_model(image_tensor).squeeze(1)
-                # Applying softmax for clarity
-                output_probs = output.softmax(1)
-                output = output_probs.argmax(1)
+                output = output.softmax(1).argmax(1)
                 seq = output.cpu().numpy()
-                prev = 0 # Blank token index is 0
+                prev = 0 # Blank token index is 0 for subject code mapping
                 result = []
                 for s in seq:
-                    # s != 0 checks for blank token (index 0)
-                    # s != prev checks for consecutive identical non-blank tokens
-                    if s != 0 and s != prev:
+                    if s != 0 and s != prev: # s != 0 checks for blank token (index 0)
                          # Map index to character using self.char_map
-                        result.append(self.char_map.get(s, ''))
+                         result.append(self.char_map.get(s, ''))
                     prev = s
             return ''.join(result)
         except Exception as e:
             st.error(f"Error extracting subject code from {image_path}: {e}")
             return "EXTRACTION ERROR"
 
-    # Keep process_answer_sheet method as it is
-    # (It will now receive the combined results from detect_regions)
+    # Modify process_answer_sheet to select the second subject region if available
     def process_answer_sheet(self, image_path):
-        # detect_regions now handles the fallback logic internally
+        # detect_regions now handles the fallback logic internally for subject code
         register_regions, subject_regions = self.detect_regions(image_path)
         results = []
         register_cropped_path = None
         subject_cropped_path = None # Initialize to None
 
+        # Select the best Register Number region (highest confidence)
         if register_regions:
-            # Assume the best register region is from the primary model's findings
             best_region = max(register_regions, key=lambda x: x[1])
             register_cropped_path = best_region[0]
             st.info(f"Extracting Register Number from: {register_cropped_path}")
@@ -258,12 +251,21 @@ class AnswerSheetExtractor:
         else:
              st.warning("No Register Number region detected.")
 
-        if subject_regions:
-            # Assume the best subject region is from the list returned by detect_regions
-            # (which is either primary or fallback results)
-            best_subject = max(subject_regions, key=lambda x: x[1])
-            subject_cropped_path = best_subject[0]
-            st.info(f"Extracting Subject Code from: {subject_cropped_path}")
+
+        # Select the Subject Code region based on the new rule
+        if subject_regions: # Only proceed if at least one subject region was found
+            if len(subject_regions) >= 2:
+                # Select the SECOND detected region (index 1)
+                best_subject = subject_regions[1]
+                subject_cropped_path = best_subject[0]
+                st.info(f"Multiple Subject Code regions detected ({len(subject_regions)}). Selecting the second one: {subject_cropped_path}")
+            else: # len(subject_regions) == 1
+                # Select the only detected region (index 0)
+                best_subject = subject_regions[0]
+                subject_cropped_path = best_subject[0]
+                st.info(f"One Subject Code region detected. Selecting it: {subject_cropped_path}")
+
+            # Now extract the subject code from the selected region
             subject_code = self.extract_subject_code(subject_cropped_path)
             results.append(("Subject Code", subject_code))
         else:
@@ -284,14 +286,14 @@ def main():
             # are present in your GitHub repository root.
             extractor = AnswerSheetExtractor(
                 primary_yolo_weights_path="improved_weights.pt",
-                fallback_yolo_weights_path="weights.pt",
+                fallback_yolo_weights_path="weights.pt", # Your previous weights
                 register_crnn_model_path="best_crnn_model(git).pth",
                 subject_crnn_model_path="best_subject_model_final.pth"
             )
             st.success("Models loaded successfully")
         except Exception as e:
             st.error(f"Failed to load models. Please check your model paths and ensure they are in your repository. Error: {e}")
-            # Optionally, st.exception(e) for more detailed traceback in logs
+            st.exception(e) # Display full traceback in logs
             return
 
     # Upload image
@@ -300,7 +302,8 @@ def main():
         # Create a temporary directory if needed, or save directly
         upload_dir = "uploads"
         os.makedirs(upload_dir, exist_ok=True)
-        image_path = os.path.join(upload_dir, uploaded_file.name) # Use original filename
+        # Using a more robust way to save the file path
+        image_path = os.path.join(upload_dir, uploaded_file.name)
 
         # Save uploaded image
         with open(image_path, "wb") as f:
@@ -311,9 +314,6 @@ def main():
 
         # Process image
         if st.button("Extract Information"):
-            # Clear previous results (optional, but good UI practice)
-            # st.empty() # Not ideal, might clear the button
-
             with st.spinner("Processing image..."):
                 try:
                     results, register_cropped, subject_cropped = extractor.process_answer_sheet(image_path)
