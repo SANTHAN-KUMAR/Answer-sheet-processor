@@ -184,7 +184,7 @@ def main():
     with st.spinner("Loading models..."):
         try:
             extractor = AnswerSheetExtractor(
-                "weights.pt",
+                "improved_weights.pt",
                 "best_crnn_model(git).pth",
                 "best_subject_model_final.pth"
             )
