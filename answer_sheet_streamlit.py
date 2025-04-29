@@ -7,10 +7,9 @@ from ultralytics import YOLO
 from PIL import Image
 from torchvision import transforms
 import torch.nn as nn
-# Removed matplotlib as it's not strictly needed for the Streamlit app display
-# import matplotlib.pyplot as plt
+from pdf2image import convert_from_path, pdfinfo_from_path # Import pdf2image
 
-# Define the CRNN model class
+# Define the CRNN model class (remains the same)
 class CRNN(nn.Module):
     def __init__(self, num_classes):
         super(CRNN, self).__init__()
@@ -56,7 +55,7 @@ class CRNN(nn.Module):
         x = self.fc(x)
         return x
 
-# Define the AnswerSheetExtractor class
+# Define the AnswerSheetExtractor class (remains mostly the same, detection logic updated)
 class AnswerSheetExtractor:
     def __init__(self, primary_yolo_weights_path, fallback_yolo_weights_path, register_crnn_model_path, subject_crnn_model_path):
         # Ensure directories exist
@@ -233,7 +232,8 @@ class AnswerSheetExtractor:
             st.error(f"Error extracting subject code from {image_path}: {e}")
             return "EXTRACTION ERROR"
 
-    # Modify process_answer_sheet to select the second subject region if available
+    # process_answer_sheet method remains the same, it takes an image path
+    # The PDF to image conversion happens before calling this method in main()
     def process_answer_sheet(self, image_path):
         # detect_regions now handles the fallback logic internally for subject code
         register_regions, subject_regions = self.detect_regions(image_path)
@@ -256,7 +256,8 @@ class AnswerSheetExtractor:
         if subject_regions: # Only proceed if at least one subject region was found
             if len(subject_regions) >= 2:
                 # Select the SECOND detected region (index 1)
-                best_subject = subject_regions[1]
+                # Ensure index 1 exists before accessing
+                best_subject = subject_regions[1] if len(subject_regions) > 1 else subject_regions[0]
                 subject_cropped_path = best_subject[0]
                 st.info(f"Multiple Subject Code regions detected ({len(subject_regions)}). Selecting the second one: {subject_cropped_path}")
             else: # len(subject_regions) == 1
@@ -296,58 +297,115 @@ def main():
             st.exception(e) # Display full traceback in logs
             return
 
-    # Upload image
-    uploaded_file = st.file_uploader("Upload Answer Sheet Image", type=["png", "jpg", "jpeg"])
-    if uploaded_file is not None:
-        # Create a temporary directory if needed, or save directly
-        upload_dir = "uploads"
-        os.makedirs(upload_dir, exist_ok=True)
-        # Using a more robust way to save the file path
-        image_path = os.path.join(upload_dir, uploaded_file.name)
+    # Upload file (now accepts PDF or image)
+    uploaded_file = st.file_uploader("Upload Answer Sheet PDF or Image", type=["pdf", "png", "jpg", "jpeg"])
 
-        # Save uploaded image
-        with open(image_path, "wb") as f:
+    if uploaded_file is not None:
+        # Create a temporary directory for uploads and processed images
+        temp_dir = "temp_uploads"
+        os.makedirs(temp_dir, exist_ok=True)
+
+        # Determine file type and process accordingly
+        file_extension = uploaded_file.name.split('.')[-1].lower()
+        temp_file_path = os.path.join(temp_dir, uploaded_file.name)
+        image_to_process_path = None # This will store the path to the image file
+
+        # Save the uploaded file
+        with open(temp_file_path, "wb") as f:
             f.write(uploaded_file.getbuffer())
 
-        # Display uploaded image
-        st.image(image_path, caption="Uploaded Image", use_column_width=True)
+        if file_extension == 'pdf':
+            st.info(f"Processing uploaded PDF: {uploaded_file.name}")
+            try:
+                # Convert the first page of the PDF to an image
+                images_from_pdf = convert_from_path(temp_file_path, dpi=300, first_page=1, last_page=1)
+                if images_from_pdf:
+                    first_page_image = images_from_pdf[0]
+                    # Save the converted image to a temporary file
+                    image_filename = os.path.splitext(uploaded_file.name)[0] + "_page_1.jpg"
+                    image_to_process_path = os.path.join(temp_dir, image_filename)
+                    first_page_image.save(image_to_process_path, "JPEG")
+                    st.success("Successfully converted first page of PDF to image.")
+                else:
+                    st.error("Could not convert first page of PDF to image.")
+                    # Clean up the temporary PDF file
+                    os.remove(temp_file_path)
+                    return # Stop processing if conversion failed
 
-        # Process image
-        if st.button("Extract Information"):
-            with st.spinner("Processing image..."):
-                try:
-                    results, register_cropped, subject_cropped = extractor.process_answer_sheet(image_path)
-                    st.success("Extraction complete")
+            except Exception as e:
+                st.error(f"Error converting PDF to image: {e}")
+                st.exception(e)
+                # Clean up the temporary PDF file
+                os.remove(temp_file_path)
+                return # Stop processing on error
 
-                    # Display results
-                    if results:
-                        st.subheader("Extracted Information:")
-                        for label, value in results:
-                            st.write(f"**{label}:** {value}")
-                    else:
-                        st.warning("No information could be extracted.")
+            # Clean up the temporary PDF file after successful conversion
+            os.remove(temp_file_path)
 
+        elif file_extension in ['png', 'jpg', 'jpeg']:
+            st.info(f"Processing uploaded image: {uploaded_file.name}")
+            # If it's already an image, the temporary file is the one to process
+            image_to_process_path = temp_file_path
 
-                    # Display cropped images
-                    st.subheader("Detected Regions:")
-                    if register_cropped:
-                         # Load image using PIL to display in Streamlit
-                         register_img = Image.open(register_cropped)
-                         st.image(register_img, caption="Cropped Register Number", width=250)
-                    else:
-                         st.info("No Register Number region found to display.")
-
-                    if subject_cropped:
-                         # Load image using PIL to display in Streamlit
-                         subject_img = Image.open(subject_cropped)
-                         st.image(subject_img, caption="Cropped Subject Code", width=250)
-                    else:
-                         st.info("No Subject Code region found to display.")
+        else:
+            st.error(f"Unsupported file type: {file_extension}")
+            # Clean up the temporary file
+            os.remove(temp_file_path)
+            return # Stop processing for unsupported types
 
 
-                except Exception as e:
-                    st.error(f"Failed to process image: {e}")
-                    st.exception(e) # Display full traceback in Streamlit logs
+        # Display the image that will be processed
+        if image_to_process_path and os.path.exists(image_to_process_path):
+             st.image(image_to_process_path, caption="Image to Process", use_column_width=True)
+
+             # Process image
+             if st.button("Extract Information"):
+                 with st.spinner("Processing image..."):
+                     try:
+                         results, register_cropped, subject_cropped = extractor.process_answer_sheet(image_to_process_path)
+                         st.success("Extraction complete")
+
+                         # Display results
+                         if results:
+                             st.subheader("Extracted Information:")
+                             for label, value in results:
+                                 st.write(f"**{label}:** {value}")
+                         else:
+                             st.warning("No information could be extracted.")
+
+                         # Display cropped images
+                         st.subheader("Detected Regions:")
+                         if register_cropped and os.path.exists(register_cropped):
+                              register_img = Image.open(register_cropped)
+                              st.image(register_img, caption="Cropped Register Number", width=250)
+                         else:
+                              st.info("No Register Number region found to display.")
+
+                         if subject_cropped and os.path.exists(subject_cropped):
+                              subject_img = Image.open(subject_cropped)
+                              st.image(subject_img, caption="Cropped Subject Code", width=250)
+                         else:
+                              st.info("No Subject Code region found to display.")
+
+                     except Exception as e:
+                         st.error(f"Failed to process image: {e}")
+                         st.exception(e) # Display full traceback in Streamlit logs
+                     finally:
+                         # Clean up temporary cropped images after processing
+                         for folder in ["cropped_register_numbers", "cropped_subject_codes", "results"]:
+                             if os.path.exists(folder):
+                                 for file in os.listdir(folder):
+                                     os.remove(os.path.join(folder, file))
+                                 # Optionally remove the folder if empty
+                                 # os.rmdir(folder)
+
+                         # Clean up the temporary image file that was processed
+                         if os.path.exists(image_to_process_path):
+                             os.remove(image_to_process_path)
+
+        else:
+            st.error("No image file available for processing.")
+
 
 if __name__ == "__main__":
     main()
