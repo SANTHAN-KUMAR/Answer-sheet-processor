@@ -293,7 +293,7 @@ def main():
                     primary_yolo_weights_path="improved_weights.pt",
                     fallback_yolo_weights_path="weights.pt", # Your previous weights
                     register_crnn_model_path="best_crnn_model(git).pth",
-                    subject_crnn_model_path="best_subject_model_final.pth"
+                    subject_crnn_model_path="best_subject_code_model_fulldataset.pth"
                 )
                 st.success("Models loaded successfully")
                 return extractor
@@ -308,7 +308,7 @@ def main():
         st.stop() # Stop the app if models failed to load
 
     # Input source selection
-    input_source = st.radio("Select Input Source", ("Upload File", "Webcam"))
+    input_source = st.radio("Select Input Source", ("Upload File", "Webcam (Experimental)"))
 
     image_to_process_path = None # This will store the path to the image file
 
