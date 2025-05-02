@@ -293,7 +293,7 @@ def main():
                     primary_yolo_weights_path="improved_weights.pt",
                     fallback_yolo_weights_path="weights.pt", # Your previous weights
                     register_crnn_model_path="best_crnn_model(git).pth",
-                    subject_crnn_model_path="best_subject_model_final.pth"
+                    subject_crnn_model_path="best_subject_code_model-fulldataset.pth"
                 )
                 st.success("Models loaded successfully")
                 return extractor
